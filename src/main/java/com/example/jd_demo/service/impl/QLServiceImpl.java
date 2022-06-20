@@ -14,7 +14,9 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class QLServiceImpl implements QLService {
@@ -25,30 +27,43 @@ public class QLServiceImpl implements QLService {
     @Autowired
     private SServers sServers;
 
-    private String tks = "";
-
     private Boolean b = true;
 
+
+    /***
+     * 根据条件查询
+     * @param value   条件
+     * @param server  哪个服务器
+     * @return
+     */
     @Override
-    public R findAll(String value) {
+    public R findAll(String value, String server) {
+
         List<QL> list = new ArrayList<>();
         String searchValue = "";
         if (!"all".equals(value)) {
             searchValue = value;
         }
 
-        String url = "http://192.168.123.17:5800/open/envs?searchValue=" + searchValue;
-        //String token = "Bearer 5a5e9c21-1934-4f98-8901-2ac2ce921f11";
+        //从redis 获取 服务器信息
+        Servers servers = (Servers) sServers.getObj(server).getData().get("data");
+
+        String url = servers.getIp() + "/open/envs?searchValue=" + searchValue;
+        String token = servers.getToken();
 
         try {
-            JSONObject res = HttpUtil.findAll(myRestTemplate, url, tks);
+            JSONObject res = HttpUtil.findAll(myRestTemplate, url, token);
             if ("401".indexOf(res.getString("code")) != -1) {
 
+                //重新获取token后还是失败就结束
                 if (b) {
-                    //模拟 重新获取token  并保存到redis
-                    tks = "Bearer 5a5e9c21-1934-4f98-8901-2ac2ce921f1";
                     b = false;
-                    return findAll(searchValue);
+                    R r = updataServer(servers);
+                    if (r.getCode() != 20000) {
+                        return R.error().message(r.getMessage());
+                    }
+                    servers = (Servers) r.getData().get("data");
+                    return findAll(value, server);
                 }
                 b = true;
                 return R.error();
@@ -78,7 +93,7 @@ public class QLServiceImpl implements QLService {
                 ql.setName(JSON.parseObject(split[i]).getString("name"));
                 list.add(ql);
             }
-            return R.ok().data("ck", list);
+            return R.ok().data("data", list);
         } catch (
                 Exception e) {
             e.printStackTrace();
@@ -88,6 +103,59 @@ public class QLServiceImpl implements QLService {
 
 
     /***
+     * token错误时调用 从新获取token并 更新redis
+     * @param servers
+     * @return
+     */
+    @Override
+    public R updataServer(Servers servers) {
+        String u = servers.getIp() + "/open/auth/token?client_id=" + servers.getClientID() + "&client_secret=" + servers.getClientSecret();
+        JSONObject jsonObject = null;
+        try {
+            jsonObject = HttpUtil.GetRequest(myRestTemplate, u);
+
+            if ("400".indexOf(jsonObject.getString("code")) != -1) {
+                return R.error().message(jsonObject.getString("message"));
+            }
+            String data = jsonObject.getString("data");
+            String tk = JSON.parseObject(data).getString("token");
+            servers.setToken("Bearer " + tk);
+            //更新redis 里的数据
+            sServers.set(servers.getRedisKey(), servers);
+            Map map = new HashMap<>();
+            map.put("data", servers);
+            return R.ok().data(map);
+        } catch (UnsupportedEncodingException unsupportedEncodingException) {
+            unsupportedEncodingException.printStackTrace();
+            return R.error();
+        }
+
+    }
+
+
+    @Override
+    public R updataCK(QL ql, Servers servers) {
+
+        //从redis 拿到某一个服务器的信息
+        servers = (Servers) sServers.getObj(servers.getRedisKey()).getData().get("data");
+
+        String url = servers.getIp() + "/open/envs";
+        String token = servers.getToken();
+        String content = ql.add().substring(1, ql.add().length() - 1);
+        try {
+            JSONObject res = HttpUtil.PutRequest(myRestTemplate,url, token,content );
+            if (!"200".equals(res.getString("code"))) {
+                return R.error().message("更新失败");
+            }
+            return R.ok().data("ck", res.getString("data"));
+        } catch (Exception e) {
+            e.printStackTrace();
+            return R.error().message("异常了--更新失败");
+        }
+
+    }
+
+    /***
      * 添加ck
      * @param ql
      * @param servers
@@ -95,6 +163,7 @@ public class QLServiceImpl implements QLService {
      */
     @Override
     public R addCK(QL ql, Servers servers) {
+
         //从redis 拿到某一个服务器的信息
         servers = (Servers) sServers.getObj(servers.getRedisKey()).getData().get("data");
 
@@ -110,28 +179,18 @@ public class QLServiceImpl implements QLService {
             e.printStackTrace();
             //重新获取token后还是失败就结束
             if (b) {
-                System.out.println("------------------------------------------------------------");
                 b = false;
-                String u = servers.getIp() + "/open/auth/token?client_id=" + servers.getClientID() + "&client_secret=" + servers.getClientSecret();
-                JSONObject jsonObject = null;
-                try {
-                    jsonObject = HttpUtil.GetRequest(myRestTemplate, u);
-                } catch (UnsupportedEncodingException unsupportedEncodingException) {
-                    unsupportedEncodingException.printStackTrace();
+                R r = updataServer(servers);
+                if (r.getCode() != 20000) {
+                    return R.error().message(r.getMessage());
                 }
-                if ("400".indexOf(jsonObject.getString("code")) != -1) {
-                    return R.error().message(jsonObject.getString("message"));
-                }
-                String data = jsonObject.getString("data");
-                String tk = JSON.parseObject(data).getString("token");
-                servers.setToken("Bearer " + tk);
-                //更新redis 里的数据
-                sServers.set(servers.getRedisKey(), servers);
+                servers = (Servers) r.getData().get("data");
                 return addCK(ql, servers);
             }
             b = true;
             return R.error();
         }
+
 
     }
 }
